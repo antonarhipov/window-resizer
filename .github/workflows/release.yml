@@ -38,7 +38,7 @@ jobs:
           xcodebuild \
             -project WindowResizer.xcodeproj \
             -scheme WindowResizer \
-            -configuration Release \
+            -configuration Debug \
             -destination 'platform=macOS' \
             -derivedDataPath "$RUNNER_TEMP/WindowResizerDerivedData" \
             CODE_SIGNING_ALLOWED=NO \

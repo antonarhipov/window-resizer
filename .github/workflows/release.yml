@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build macOS release
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      HAS_SIGNING_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_BASE64 != '' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate release tag
+        run: |
+          SOURCE_VERSION="$(<VERSION)"
+          if [[ "$GITHUB_REF_NAME" != "v$SOURCE_VERSION" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION ($SOURCE_VERSION)." >&2
+            exit 1
+          fi
+          if ! grep -q "MARKETING_VERSION = $SOURCE_VERSION;" WindowResizer.xcodeproj/project.pbxproj; then
+            echo "Xcode project version does not match VERSION ($SOURCE_VERSION)." >&2
+            exit 1
+          fi
+          echo "RELEASE_VERSION=$SOURCE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Run unit tests
+        run: |
+          xcodebuild \
+            -project WindowResizer.xcodeproj \
+            -scheme WindowResizer \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/WindowResizerDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Import Developer ID certificate
+        if: ${{ env.HAS_SIGNING_CERTIFICATE == 'true' }}
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/window-resizer-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+          SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Developer ID Application/{print $2; exit}')"
+          if [[ -z "$SIGNING_IDENTITY" ]]; then
+            echo "No Developer ID Application identity was found in the certificate." >&2
+            exit 1
+          fi
+          echo "WINDOW_RESIZER_SIGNING_IDENTITY=$SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build universal release
+        env:
+          WINDOW_RESIZER_BUILD_CONFIGURATION: Release
+          WINDOW_RESIZER_VERSION: ${{ env.RELEASE_VERSION }}
+          WINDOW_RESIZER_BUILD_NUMBER: ${{ github.run_number }}
+        run: ./Scripts/build-app.sh
+
+      - name: Notarize and staple
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [[ -z "$APPLE_ID" || -z "$APPLE_TEAM_ID" || -z "$APPLE_APP_PASSWORD" ]]; then
+            echo "Apple notarization secrets are not configured; publishing the signed or ad-hoc build without notarization."
+            exit 0
+          fi
+          if [[ -z "${WINDOW_RESIZER_SIGNING_IDENTITY:-}" ]]; then
+            echo "Notarization secrets are present, but no Developer ID certificate was configured." >&2
+            exit 1
+          fi
+
+          NOTARIZATION_ARCHIVE="$RUNNER_TEMP/WindowResizer-notarization.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/WindowResizer.app "$NOTARIZATION_ARCHIVE"
+          xcrun notarytool submit "$NOTARIZATION_ARCHIVE" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple build/WindowResizer.app
+          xcrun stapler validate build/WindowResizer.app
+
+      - name: Package artifacts
+        run: |
+          mkdir -p artifacts
+          ARCHIVE_NAME="WindowResizer-$RELEASE_VERSION-macOS-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/WindowResizer.app "artifacts/$ARCHIVE_NAME"
+          (cd artifacts && shasum -a 256 "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256")
+          codesign --verify --deep --strict build/WindowResizer.app
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" artifacts/* \
+              --verify-tag \
+              --title "Window Resizer $RELEASE_VERSION" \
+              --generate-notes
+          fi
+
+      - name: Remove temporary keychain
+        if: ${{ always() && env.HAS_SIGNING_CERTIFICATE == 'true' }}
+        run: security delete-keychain "$RUNNER_TEMP/window-resizer-signing.keychain-db" || true

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run unit tests
+        run: |
+          xcodebuild \
+            -project WindowResizer.xcodeproj \
+            -scheme WindowResizer \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/WindowResizerDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Build universal release
+        env:
+          WINDOW_RESIZER_BUILD_CONFIGURATION: Release
+        run: ./Scripts/build-app.sh
+
+      - name: Verify release bundle
+        run: |
+          codesign --verify --deep --strict build/WindowResizer.app
+          test "$(plutil -extract CFBundleShortVersionString raw build/WindowResizer.app/Contents/Info.plist)" = "$(<VERSION)"
+          grep -q "MARKETING_VERSION = $(<VERSION);" WindowResizer.xcodeproj/project.pbxproj
+          ARCHITECTURES="$(lipo -archs build/WindowResizer.app/Contents/MacOS/WindowResizer)"
+          [[ "$ARCHITECTURES" == *arm64* ]]
+          [[ "$ARCHITECTURES" == *x86_64* ]]

@@ -26,7 +26,20 @@ Current version: **0.1.0**
 3. Double-click the ZIP to extract `WindowResizer.app`, then move the app to **Applications**.
 4. Open **Window Resizer** from Applications.
 
-If macOS says it cannot verify the developer, Control-click **Window Resizer**, choose **Open**, and confirm once. If **Open** is not offered, try launching the app once and then allow it under **System Settings > Privacy & Security > Open Anyway**.
+The current release is ad-hoc signed but not Apple-notarized, so Gatekeeper may prevent it from opening. If macOS says it cannot verify the developer:
+
+1. Control-click `WindowResizer.app` and choose **Open**.
+2. Confirm **Open** again.
+
+If **Open** is not offered, try launching the app once, then go to **System Settings > Privacy & Security** and choose **Open Anyway**.
+
+As a terminal fallback, remove the quarantine attribute after verifying that the app came from this repository's release and that its SHA-256 checksum matches:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/WindowResizer.app
+```
+
+Then open the app normally. Only remove quarantine from an application you trust.
 
 ### Grant Accessibility permission
 
